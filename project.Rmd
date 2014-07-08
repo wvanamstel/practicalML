@@ -1,0 +1,143 @@
+Construction of a prediction model
+---  
+
+##Introduction
+The goal of this exercise is to predict how well a physical activity (in this case barbell lifts) is performed by a test person, given data from accelerometers attached to the subjects arm, forearm, belt and barbell.
+The data for this analysis were obtained from [http://groupware.les.inf.puc-rio.br/har]  
+The variable to be predicted is named *classe* and consists of 5 levels describing how well the exercise was performed. The levels range from *A* to *E*, from exactly following the specifications through various errors made during the execution. Refer the link in the above for more information.  
+
+The analysis was done on a dual core 2.0GHz processor, 2GB internal RAM, using R version 3.0.2 on a 64-bit Linux distribution (Ubuntu 13.04).
+
+##Acquiring the data
+The training data and test data sets were respectively obtained from:  
+- Training set: [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)  
+- Test set: [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv)
+
+Loading the data into R:
+```{r read_data}
+training <- read.csv("../data/pml-training.csv")
+testing <- read.csv("../data/pml-testing.csv")
+```
+
+##Exploratory analysis and pre-processing the data
+Both the raw training data and the test data contain 160 predictor variables, the training data have 19622 observations and the test data have 20 observations to be used for predictions.  
+
+Examining the data reveals that there are many predictors that have missing values, these predictors can be discarded. In addition, there are several predictors that are most likely of no importance (i.e. data from sources other than the sensors) to the outcome we wish to predict, e.g. time stamp data and the name of the subject doing the exercises. The predictor *magnet_belt_z* is removed as well, because it exists only in the training and not in the test set. After this processing step, a data set with 53 predictors remains.
+
+Removing impertinent columns and columns with missing data
+```{r prep_data}
+##remove empty and NA columns from data set
+no_na <- sapply(training, function(x) all(!is.na(x)))
+train_pp <-training[no_na]
+not_empty <- sapply(train_pp, function(x) all(x != ""))
+train_pp <- train_pp[not_empty]
+
+#remove user_name, cvtd_timestamp and new_window columns, i.e. non sensor data
+#and column magnet_belt_z which does not exist in test set
+train_pp <- train_pp[,-c(1:6, 20)]
+```
+
+Do a principal component analysis to investigate if features are particularly predictive. The first to features seem to be describing most of the variance:
+```{r pca}
+### principal component analysis
+pc_a <- prcomp(train_pp[-53], center=TRUE, scale=TRUE)
+PC_var <- pc_a$sd^2/sum(pc_a$sd^2)
+plot(PC_var)
+```
+
+
+Plotting these two features against each other, shows that the outcomes are grouped into 5 clusters, but unfortunately the outcomes are distributed randomly:
+```{r, message=FALSE}
+### first two components seem significant, plot clusters:
+require(ggplot2)
+```
+
+```{r}
+ggplot(data=NULL, aes(x=pc_a$x[,1], y=pc_a$x[,2], color=train_pp$classe)) +
+  geom_point(size=3,alpha=0.55)+ guides(colour = guide_legend(override.aes = list(alpha = 1)))
+```
+
+Subsequently the training data are divided into a training and validation set in a 70%/30% proportion:
+```{r train_split, message=FALSE}
+require(caret)
+set.seed(23)
+in_train <- createDataPartition(y=train_pp$classe, p=0.70, list=FALSE)
+validation <- train_pp[-in_train,]
+train_pp <- train_pp[in_train,]
+```
+
+It is possible to check the correlation between predictors, and it follows that many predictors are actually highly correlated (> 0.80, dark blue):
+```{r corrgram, message=FALSE}
+M <- abs(cor(train_pp[,-53]))
+diag(M) <- 0
+require(corrgram)
+corrgram(M[1:15,1:15], main="Correlogram of first 15 predictors", upper.panel=NULL)
+```
+
+Because the number of predictors is relative small, and resulting from the above analysis of the predictor variance, I decided to not do any pre-processing of the data in terms of selecting a subset of relevant predictors in addition to the earlier steps taken.
+
+##Model fitting
+Now that the pre-processing of the data is done, the next step in the analysis is model fitting. I decided to fit 3 predictive models to the data, namely:  
+- A simple Classification and Regression Tree model  
+- A Support Vector Machine model  
+- A Random Forest model with a 4-fold re-sampling cross validation
+
+Before we can start the model fitting, make sure that we can make use of both available CPUs for parallel computing:
+```{r multi_core, message=FALSE}
+#construct a trainControl object to allow for parallel processing
+require(doMC)
+registerDoMC(2)  #allow for multicore calcs
+```
+
+Fit the models:
+```{r, cache=TRUE, message=FALSE}
+##regression tree model
+tr_control <- trainControl(allowParallel = TRUE)
+model_rpart <- train(train_pp$classe ~ ., trControl=tr_control, method="rpart", data=train_pp)
+##support vector machine model
+model_svm <- svm(train_pp$classe ~ ., data=train_pp)
+##random forest with 4 fold resampling
+tr_control <- trainControl(method="cv", number=4, allowParallel=TRUE)
+model_rf <- train(train_pp$classe ~ ., trControl=tr_control, method="rf", data=train_pp)
+```
+
+Using these models on the validation set yields:
+```{r, cache=TRUE}
+pred_rpart <- predict(model_rpart, validation)
+pred_svm <- predict(model_svm, validation)
+pred_rf <- predict(model_rf, validation)
+```
+
+The resulting out-of-sample accuracy for each of the methods is:  
+- CART: `r sum(pred_rpart == validation$classe)/length(pred_rpart)`  
+- SVM: `r sum(pred_svm == validation$classe)/length(pred_svm)`  
+- RF: `r sum(pred_rf == validation$classe)/length(pred_rf)`  
+
+It is possible to compute a confusion matrix showing the results of the predictive model while using the validation data set. In this case, only the confusion matrix for the random forest model is shown.
+```{r}
+validation$pred_right <- pred_rf == validation$classe
+confusionMatrix(pred_rf, validation$classe)
+```
+
+The out of sample accuracy is highest when the random forest model is used. Use this model on the test data, after the same pre-processing steps are taken as applicable to the training data.
+```{r}
+#make sure that the test set contains the same columns as the training set
+no_na <- sapply(testing, function(x) all(!is.na(x)))
+test_pp <-testing[no_na]
+not_empty <- sapply(test_pp, function(x) all(x != ""))
+test_pp <- test_pp[not_empty]
+#remove user_name, cvtd_timestamp and new_window columns, i.e. non sensor data
+test_pp <- test_pp[,-c(1:6,20)]
+```
+
+Now it is possible to predict the *classe* outcome using the variables in the test set, and output the result:
+```{r}
+test_rf <- predict(model_rf, test_pp)
+test_rf
+```
+ 
+This model correctly predicts the outcome of 20 out of 20 observations in the test set.
+
+##Recommendations
+There are a couple of things that can be investigated in addition to the analysis done here. First of all, it is possible to decrease the number of observations in the training set by about 75%. The out of sample accuracy suffers somewhat, but this is offset by a large improvement in the time needed to fit the random forest model.  
+In addition, it would be very interesting to experiment with additional prediction models and model stacking/combining several models. 
